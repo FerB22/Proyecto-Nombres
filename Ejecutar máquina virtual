@@ -1,0 +1,5 @@
+# Crea el entorno virtual llamado ".venv"
+python -m venv .venv
+
+# Activa el entorno virtual en Windows (CMD o PowerShell)
+.venv\Scripts\activate

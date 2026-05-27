@@ -1,0 +1,262 @@
+import sys
+import random
+import sqlite3  # <-- Importamos el conector de base de datos
+from PySide6.QtCore import QSettings
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QComboBox,
+    QTextEdit, QVBoxLayout, QHBoxLayout, QFrame
+)
+from PySide6.QtGui import QFont
+from PySide6.QtCore import Qt
+
+
+# --- NUEVA FUNCIÓN PARA CARGAR DATOS DESDE SQL ---
+def cargar_datos_sql():
+    try:
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        
+        morfologia = {}
+        
+        # Obtenemos todas las regiones
+        cursor.execute("SELECT id, nombre FROM regiones")
+        regiones = cursor.fetchall()
+        
+        for region_id, nombre_region in regiones:
+            morfologia[nombre_region] = {"prefijos": [], "raices": [], "sufijos": []}
+            
+            # Obtenemos los morfemas de esta región
+            cursor.execute("SELECT tipo, valor FROM morfemas WHERE region_id = ?", (region_id,))
+            morfemas = cursor.fetchall()
+            
+            for tipo, valor in morfemas:
+                morfologia[nombre_region][tipo].append(valor)
+                
+        conexion.close()
+        
+        # Si la base de datos está vacía, avisamos para evitar errores
+        if not morfologia:
+            print("⚠️ La base de datos está vacía o no tiene el formato correcto.")
+            sys.exit(1)
+            
+        return morfologia
+        
+    except sqlite3.OperationalError:
+        print("⚠️ Error: No se encontró la base de datos 'lore.db'.")
+        print("Por favor, ejecuta primero el script que crea la base de datos.")
+        sys.exit(1)
+
+# 1. Cargamos la base de datos a la memoria de la app
+morfologia_universo = cargar_datos_sql()
+
+# 2. Generamos el historial dinámicamente basado en las regiones que existan en la BD
+historial_nombres = {region: [] for region in morfologia_universo.keys()}
+
+
+class GeneradorLore(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.settings = QSettings("FernandoBarra", "EnciclopediaUniverso")
+        self.setWindowTitle("Enciclopedia del Universo")
+        self.resize(750, 450)
+
+        self.crear_interfaz()
+        self.aplicar_estilos()
+        self.restaurar_geometria()
+
+    def crear_interfaz(self):
+        layout_principal = QHBoxLayout()
+        layout_principal.setContentsMargins(20, 20, 20, 20)
+        layout_principal.setSpacing(20)
+
+        panel_izq = QFrame()
+        panel_izq.setObjectName("panel")
+        layout_izq = QVBoxLayout(panel_izq)
+
+        lbl_registro = QLabel("Registros Forjados")
+        lbl_registro.setAlignment(Qt.AlignCenter)
+        lbl_registro.setObjectName("titulo_panel") # <-- Asignado para CSS
+
+        self.texto_historial = QTextEdit()
+        self.texto_historial.setReadOnly(True)
+
+        layout_izq.addWidget(lbl_registro)
+        layout_izq.addWidget(self.texto_historial)
+
+        panel_der = QFrame()
+        panel_der.setObjectName("panel")
+        layout_der = QVBoxLayout(panel_der)
+        layout_der.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        layout_der.setSpacing(15)
+
+        titulo = QLabel("🪄 Generador de Lore")
+        titulo.setAlignment(Qt.AlignCenter)
+        titulo.setObjectName("titulo_principal") # <-- Asignado para CSS
+
+        self.combo_region = QComboBox()
+        self.combo_region.addItems(morfologia_universo.keys())
+        self.combo_region.setFixedWidth(250)
+
+        lbl_silabas = QLabel("Longitud del nombre (Sílabas):")
+        lbl_silabas.setAlignment(Qt.AlignCenter)
+        lbl_silabas.setObjectName("subtitulo") # <-- Asignado para CSS
+
+        self.combo_silabas = QComboBox()
+        self.combo_silabas.addItems(["2", "3", "4"])
+        self.combo_silabas.setCurrentText("3")
+        self.combo_silabas.setFixedWidth(80)
+
+        btn_generar = QPushButton("Forjar Nombre")
+        btn_generar.setFixedHeight(40)
+        btn_generar.clicked.connect(self.generar_nombre)
+
+        self.etiqueta_resultado = QLabel("Selecciona una región")
+        self.etiqueta_resultado.setAlignment(Qt.AlignCenter)
+        self.etiqueta_resultado.setObjectName("resultado") # <-- Asignado para CSS
+
+        layout_der.addSpacing(20)
+        layout_der.addWidget(titulo)
+        layout_der.addSpacing(10)
+        layout_der.addWidget(self.combo_region, alignment=Qt.AlignCenter)
+        layout_der.addWidget(lbl_silabas)
+        layout_der.addWidget(self.combo_silabas, alignment=Qt.AlignCenter)
+        layout_der.addSpacing(10)
+        layout_der.addWidget(btn_generar, alignment=Qt.AlignCenter)
+        layout_der.addSpacing(10)
+        layout_der.addWidget(self.etiqueta_resultado)
+
+        layout_principal.addWidget(panel_izq, 1)
+        layout_principal.addWidget(panel_der, 2)
+
+        self.setLayout(layout_principal)
+
+    def aplicar_estilos(self):
+        self.setStyleSheet("""
+            QLabel#titulo_principal {
+                font-size: 28px;
+                font-weight: 700;
+                color: #ffffff;
+                background-color: transparent;
+            }
+
+            QLabel#titulo_panel {
+                font-size: 18px;
+                font-weight: 600;
+                color: #f4f4f4;
+                background-color: transparent;
+            }
+
+            QLabel#subtitulo {
+                font-size: 14px;
+                color: #b8c0cc;
+                background-color: transparent;
+            }
+
+            QLabel#resultado {
+            font-size: 20px;
+            font-weight: 600;
+            color: #ffffff;
+            background-color: transparent;
+            border: none;
+            padding: 6px 0px;
+            }
+
+            QTextEdit {
+                background-color: #171a20;
+                color: #e8ecf1;
+                border: 1px solid #343b48;
+                border-radius: 14px;
+                padding: 10px;
+                selection-background-color: #2f80c1;
+            }
+
+            QComboBox {
+                background-color: #171a20;
+                color: #f2f2f2;
+                border: 1px solid #343b48;
+                border-radius: 12px;
+                padding: 10px 14px;
+                min-height: 22px;
+            }
+
+            QComboBox:hover {
+                border: 1px solid #4a5568;
+            }
+
+            QComboBox:focus {
+                border: 1px solid #2f80c1;
+            }
+
+            QComboBox::drop-down {
+                border: none;
+                width: 30px;
+            }
+
+            QPushButton {
+                background-color: #2f80c1;
+                color: white;
+                border: none;
+                border-radius: 12px;
+                padding: 12px 20px;
+                font-size: 16px;
+                font-weight: 700;
+                min-width: 180px;
+            }
+
+            QPushButton:hover {
+                background-color: #3d8ed0;
+            }
+
+            QPushButton:pressed {
+                background-color: #276b9f;
+            }
+        """)
+
+    def generar_nombre(self):
+        region = self.combo_region.currentText()
+        reglas = morfologia_universo[region]
+        cantidad_silabas = int(self.combo_silabas.currentText())
+
+        prefijo = random.choice(reglas["prefijos"])
+        sufijo = random.choice(reglas["sufijos"])
+
+        if cantidad_silabas == 2:
+            nombre_crudo = f"{prefijo}{sufijo}"
+        elif cantidad_silabas == 3:
+            raiz = random.choice(reglas["raices"])
+            nombre_crudo = f"{prefijo}{raiz}{sufijo}"
+        else:
+            raiz1 = random.choice(reglas["raices"])
+            raiz2 = random.choice(reglas["raices"])
+            nombre_crudo = f"{prefijo}{raiz1}{raiz2}{sufijo}"
+
+        nombre_generado = nombre_crudo.lower().capitalize()
+        self.etiqueta_resultado.setText(f"✨ {nombre_generado} ✨")
+
+        historial_nombres[region].append(nombre_generado)
+
+        texto = []
+        for reg, nombres in historial_nombres.items():
+            if nombres:
+                texto.append(f"--- {reg} ---")
+                for n in nombres:
+                    texto.append(f"• {n}")
+                texto.append("")
+
+        self.texto_historial.setPlainText("\n".join(texto))
+
+    def restaurar_geometria(self):
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        super().closeEvent(event)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    ventana = GeneradorLore()
+    ventana.show()
+    sys.exit(app.exec())

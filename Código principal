@@ -1,0 +1,977 @@
+import sys
+import random
+import sqlite3
+from PySide6.QtCore import QSettings, Qt
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton, QComboBox,
+    QTextEdit, QVBoxLayout, QHBoxLayout, QFrame, QTabWidget,
+    QLineEdit, QFormLayout, QMessageBox, QStackedWidget
+)
+from PySide6.QtGui import QFont
+
+
+# =====================================================================
+# LÓGICA DE BASE DE DATOS (SQLITE)
+# =====================================================================
+def inicializar_y_actualizar_db():
+    conexion = sqlite3.connect("lore.db")
+    cursor = conexion.cursor()
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS regiones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT UNIQUE NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS morfemas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            region_id INTEGER,
+            tipo TEXT NOT NULL, 
+            valor TEXT NOT NULL,
+            FOREIGN KEY (region_id) REFERENCES regiones (id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS facciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            region_id INTEGER,
+            tipo TEXT NOT NULL,
+            nombre TEXT NOT NULL,
+            FOREIGN KEY (region_id) REFERENCES regiones (id)
+        )
+    """)
+    conexion.commit()
+    conexion.close()
+
+
+def obtener_morfologia_db():
+    try:
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        morfologia = {}
+        
+        cursor.execute("SELECT id, nombre FROM regiones")
+        regiones = cursor.fetchall()
+        
+        for region_id, nombre_region in regiones:
+            morfologia[nombre_region] = {"prefijos": [], "raices": [], "sufijos": []}
+            cursor.execute("SELECT tipo, valor FROM morfemas WHERE region_id = ?", (region_id,))
+            morfemas = cursor.fetchall()
+            
+            for tipo, valor in morfemas:
+                morfologia[nombre_region][tipo].append(valor)
+                
+        conexion.close()
+        return morfologia
+    except sqlite3.OperationalError:
+        return {}
+
+
+def obtener_facciones_region(nombre_region):
+    try:
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("""
+            SELECT f.tipo, f.nombre 
+            FROM facciones f
+            JOIN regiones r ON f.region_id = r.id
+            WHERE r.nombre = ?
+        """, (nombre_region,))
+        facciones = cursor.fetchall()
+        conexion.close()
+        return facciones
+    except sqlite3.Error:
+        return []
+
+
+# =====================================================================
+# PESTAÑA 1: GENERADOR DE LORE
+# =====================================================================
+class TabGenerador(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.historial_nombres = {}
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        layout_principal = QHBoxLayout()
+        layout_principal.setContentsMargins(10, 10, 10, 10)
+        layout_principal.setSpacing(15)
+
+        panel_izq = QFrame()
+        panel_izq.setObjectName("panel")
+        layout_izq = QVBoxLayout(panel_izq)
+
+        lbl_registro = QLabel("Registros Forjados")
+        lbl_registro.setAlignment(Qt.AlignCenter)
+        lbl_registro.setObjectName("titulo_panel")
+
+        self.texto_historial = QTextEdit()
+        self.texto_historial.setReadOnly(True)
+
+        layout_izq.addWidget(lbl_registro)
+        layout_izq.addWidget(self.texto_historial)
+
+        panel_der = QFrame()
+        panel_der.setObjectName("panel")
+        layout_der = QVBoxLayout(panel_der)
+        layout_der.setContentsMargins(20, 15, 20, 15)
+        layout_der.setSpacing(12)
+
+        titulo = QLabel("🪄 Forja de Nombres")
+        titulo.setAlignment(Qt.AlignCenter)
+        titulo.setObjectName("titulo_principal")
+
+        self.combo_region = QComboBox()
+        self.combo_region.setFixedWidth(280)
+        self.combo_region.currentTextChanged.connect(self.cargar_facciones_territorio)
+
+        lbl_info_territorio = QLabel("Comunidades del Territorio:")
+        lbl_info_territorio.setObjectName("subtitulo")
+        
+        self.texto_facciones = QTextEdit()
+        self.texto_facciones.setReadOnly(True)
+        self.texto_facciones.setFixedHeight(100)
+        self.texto_facciones.setPlaceholderText("No hay asentamientos registrados aquí.")
+
+        lbl_silabas = QLabel("Longitud del nombre (Sílabas):")
+        lbl_silabas.setAlignment(Qt.AlignCenter)
+        lbl_silabas.setObjectName("subtitulo")
+
+        self.combo_silabas = QComboBox()
+        self.combo_silabas.addItems(["2", "3", "4"])
+        self.combo_silabas.setCurrentText("3")
+        self.combo_silabas.setFixedWidth(80)
+
+        btn_generar = QPushButton("Forjar Nombre")
+        btn_generar.setFixedHeight(40)
+        btn_generar.clicked.connect(self.generar_nombre)
+
+        self.etiqueta_resultado = QLabel("Selecciona una región")
+        self.etiqueta_resultado.setAlignment(Qt.AlignCenter)
+        self.etiqueta_resultado.setObjectName("resultado")
+
+        layout_der.addWidget(titulo)
+        layout_der.addWidget(self.combo_region, alignment=Qt.AlignCenter)
+        layout_der.addWidget(lbl_info_territorio)
+        layout_der.addWidget(self.texto_facciones)
+        layout_der.addWidget(lbl_silabas, alignment=Qt.AlignCenter)
+        layout_der.addWidget(self.combo_silabas, alignment=Qt.AlignCenter)
+        layout_der.addSpacing(5)
+        layout_der.addWidget(btn_generar, alignment=Qt.AlignCenter)
+        layout_der.addWidget(self.etiqueta_resultado)
+
+        layout_principal.addWidget(panel_izq, 1)
+        layout_principal.addWidget(panel_der, 2)
+        self.setLayout(layout_principal)
+        
+        self.actualizar_combo_regiones()
+
+    def actualizar_combo_regiones(self):
+        region_actual = self.combo_region.currentText()
+        self.combo_region.clear()
+        morfologia = obtener_morfologia_db()
+        if morfologia:
+            self.combo_region.addItems(morfologia.keys())
+            for region in morfologia.keys():
+                if region not in self.historial_nombres:
+                    self.historial_nombres[region] = []
+            
+            if region_actual in morfologia.keys():
+                self.combo_region.setCurrentText(region_actual)
+                
+        self.cargar_facciones_territorio()
+
+    def cargar_facciones_territorio(self):
+        region = self.combo_region.currentText()
+        if not region:
+            self.texto_facciones.setPlainText("")
+            return
+        
+        facciones = obtener_facciones_region(region)
+        if not facciones:
+            self.texto_facciones.setPlainText("Explorado: Territorio virgen (Sin reinos ni tribus registrados).")
+            return
+            
+        texto = []
+        reinos = [f[1] for f in facciones if f[0] == "Reino"]
+        tribus = [f[1] for f in facciones if f[0] == "Tribu"]
+        
+        if reinos:
+            texto.append("🏰 REINOS:")
+            for r in reinos:
+                texto.append(f"  • {r}")
+        if tribus:
+            if reinos: texto.append("") 
+            texto.append("🔥 TRIBUS:")
+            for t in tribus:
+                texto.append(f"  • {t}")
+                
+        self.texto_facciones.setPlainText("\n".join(texto))
+
+    def generar_nombre(self):
+        region = self.combo_region.currentText()
+        if not region: return
+
+        morfologia = obtener_morfologia_db()
+        reglas = morfologia.get(region, {})
+        amount_silabas = int(self.combo_silabas.currentText())
+
+        if not reglas.get("prefijos") or not reglas.get("sufijos"):
+            self.etiqueta_resultado.setText("⚠️ Faltan morfemas en la BD")
+            return
+
+        prefijo = random.choice(reglas["prefijos"])
+        sufijo = random.choice(reglas["sufijos"])
+
+        if amount_silabas == 2:
+            nombre_crudo = f"{prefijo}{sufijo}"
+        elif amount_silabas == 3:
+            if not reglas.get("raices"):
+                self.etiqueta_resultado.setText("⚠️ Falta agregar raíces")
+                return
+            raiz = random.choice(reglas["raices"])
+            nombre_crudo = f"{prefijo}{raiz}{sufijo}"
+        else:
+            if len(reglas.get("raices", [])) < 1:
+                self.etiqueta_resultado.setText("⚠️ Requiere raíces")
+                return
+            raiz1 = random.choice(reglas["raices"])
+            raiz2 = random.choice(reglas["raices"])
+            nombre_crudo = f"{prefijo}{raiz1}{raiz2}{sufijo}"
+
+        nombre_generado = nombre_crudo.lower().capitalize()
+        self.etiqueta_resultado.setText(f"✨ {nombre_generado} ✨")
+
+        if region in self.historial_nombres:
+            self.historial_nombres[region].append(nombre_generado)
+
+        texto = []
+        for reg, nombres in self.historial_nombres.items():
+            if nombres:
+                texto.append(f"--- {reg} ---")
+                for n in nombres:
+                    texto.append(f"• {n}")
+                texto.append("")
+
+        self.texto_historial.setPlainText("\n".join(texto))
+
+
+# =====================================================================
+# PESTAÑA 2: GESTOR DE MUNDO (REGIONES Y FACCIONES)
+# =====================================================================
+class TabGestorMundo(QWidget):
+    def __init__(self, callback_sincronizar):
+        super().__init__()
+        self.callback_sincronizar = callback_sincronizar
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        layout_principal = QHBoxLayout()
+        layout_principal.setContentsMargins(20, 20, 20, 20)
+        layout_principal.setSpacing(20)
+
+        panel_region = QFrame()
+        panel_region.setObjectName("panel")
+        layout_region = QVBoxLayout(panel_region)
+        layout_region.setSpacing(15)
+
+        lbl_tit_reg = QLabel("🗺️ 1. Registrar Región")
+        lbl_tit_reg.setObjectName("titulo_panel")
+        
+        form_region = QFormLayout()
+        self.input_nueva_region = QLineEdit()
+        self.input_nueva_region.setPlaceholderText("Ej: Continente Helado")
+        form_region.addRow("Nueva Región:", self.input_nueva_region)
+        
+        btn_reg = QPushButton("Crear Región")
+        btn_reg.clicked.connect(self.guardar_region)
+
+        layout_region.addWidget(lbl_tit_reg)
+        layout_region.addLayout(form_region)
+        layout_region.addSpacing(10)
+        layout_region.addWidget(btn_reg)
+        layout_region.addStretch()
+
+        panel_faccion = QFrame()
+        panel_faccion.setObjectName("panel")
+        layout_faccion = QVBoxLayout(panel_faccion)
+        layout_faccion.setSpacing(15)
+
+        lbl_tit_fac = QLabel("🏰 2. Asignar Comunidades")
+        lbl_tit_fac.setObjectName("titulo_panel")
+        
+        form_faccion = QFormLayout()
+        self.combo_region_faccion = QComboBox()
+        self.combo_tipo_faccion = QComboBox()
+        self.combo_tipo_faccion.addItems(["Reino", "Tribu"])
+        self.input_nombre_faccion = QLineEdit()
+        self.input_nombre_faccion.setPlaceholderText("Ej: Gremio de Hierro")
+        
+        form_faccion.addRow("Región:", self.combo_region_faccion)
+        form_faccion.addRow("Tipo:", self.combo_tipo_faccion)
+        form_faccion.addRow("Nombre:", self.input_nombre_faccion)
+        
+        btn_fac = QPushButton("Vincular Asentamiento")
+        btn_fac.clicked.connect(self.guardar_faccion)
+
+        layout_faccion.addWidget(lbl_tit_fac)
+        layout_faccion.addLayout(form_faccion)
+        layout_faccion.addSpacing(10)
+        layout_faccion.addWidget(btn_fac)
+        layout_faccion.addStretch()
+
+        layout_principal.addWidget(panel_region, 1)
+        layout_principal.addWidget(panel_faccion, 1)
+        self.setLayout(layout_principal)
+        
+        self.actualizar_combos()
+
+    def actualizar_combos(self):
+        region_actual = self.combo_region_faccion.currentText()
+        self.combo_region_faccion.clear()
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("SELECT id, nombre FROM regiones")
+            regiones = cursor.fetchall()
+            conexion.close()
+            
+            for region_id, nombre in regiones:
+                self.combo_region_faccion.addItem(nombre, userData=region_id)
+                
+            if region_actual:
+                self.combo_region_faccion.setCurrentText(region_actual)
+        except sqlite3.Error:
+            pass
+
+    def guardar_region(self):
+        nombre = self.input_nueva_region.text().strip()
+        if not nombre:
+            QMessageBox.warning(self, "Validación", "El nombre de la región no puede estar vacío.")
+            return
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("INSERT INTO regiones (nombre) VALUES (?)", (nombre,))
+            conexion.commit()
+            conexion.close()
+            
+            QMessageBox.information(self, "Éxito", f"Región '{nombre}' guardada en el mapa.")
+            self.input_nueva_region.clear()
+            
+            self.callback_sincronizar()
+        except sqlite3.Error:
+            QMessageBox.warning(self, "Error", "Esa región ya existe en la base de datos.")
+
+    def guardar_faccion(self):
+        region_id = self.combo_region_faccion.currentData()
+        tipo = self.combo_tipo_faccion.currentText()
+        nombre = self.input_nombre_faccion.text().strip()
+
+        if not region_id or not nombre:
+            QMessageBox.warning(self, "Validación", "Debes seleccionar una región y escribir un nombre.")
+            return
+
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("INSERT INTO facciones (region_id, tipo, nombre) VALUES (?, ?, ?)", (region_id, tipo, nombre))
+            conexion.commit()
+            conexion.close()
+            
+            QMessageBox.information(self, "Éxito", f"{tipo} '{nombre}' anexado correctamente.")
+            self.input_nombre_faccion.clear()
+            self.callback_sincronizar()
+        except sqlite3.Error as e:
+            QMessageBox.critical(self, "Error SQL", str(e))
+
+
+# =====================================================================
+# PESTAÑA 3: GESTOR LINGÜÍSTICO (MORFEMAS)
+# =====================================================================
+class TabGestorMorfemas(QWidget):
+    def __init__(self, callback_sincronizar):
+        super().__init__()
+        self.callback_sincronizar = callback_sincronizar
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        layout_principal = QVBoxLayout()
+        layout_principal.setAlignment(Qt.AlignCenter)
+        
+        panel_morfemas = QFrame()
+        panel_morfemas.setObjectName("panel")
+        panel_morfemas.setFixedWidth(500) 
+        layout_morfemas = QVBoxLayout(panel_morfemas)
+        layout_morfemas.setContentsMargins(30, 30, 30, 30)
+        layout_morfemas.setSpacing(20)
+
+        lbl_tit_mor = QLabel("🧬 3. Inyectar Morfemas Lingüísticos")
+        lbl_tit_mor.setObjectName("titulo_panel")
+        lbl_tit_mor.setAlignment(Qt.AlignCenter)
+        
+        formulario_morfema = QFormLayout()
+        formulario_morfema.setSpacing(15)
+        
+        self.combo_region_morfema = QComboBox()
+        self.combo_tipo_morfema = QComboBox()
+        self.combo_tipo_morfema.addItems(["prefijos", "raices", "sufijos"])
+        self.input_valor_morfema = QLineEdit()
+        self.input_valor_morfema.setPlaceholderText("Ej: thor, val, grim...")
+        
+        formulario_morfema.addRow("Región Destino:", self.combo_region_morfema)
+        formulario_morfema.addRow("Tipo de Sílaba:", self.combo_tipo_morfema)
+        formulario_morfema.addRow("Sílaba / Valor:", self.input_valor_morfema)
+
+        btn_guardar_morfema = QPushButton("Guardar Morfema")
+        btn_guardar_morfema.clicked.connect(self.guardar_morfema)
+
+        layout_morfemas.addWidget(lbl_tit_mor)
+        layout_morfemas.addSpacing(10)
+        layout_morfemas.addLayout(formulario_morfema)
+        layout_morfemas.addSpacing(10)
+        layout_morfemas.addWidget(btn_guardar_morfema)
+
+        layout_principal.addWidget(panel_morfemas)
+        self.setLayout(layout_principal)
+        
+        self.actualizar_combos()
+
+    def actualizar_combos(self):
+        region_actual = self.combo_region_morfema.currentText()
+        self.combo_region_morfema.clear()
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("SELECT id, nombre FROM regiones")
+            regiones = cursor.fetchall()
+            conexion.close()
+            
+            for region_id, nombre in regiones:
+                self.combo_region_morfema.addItem(nombre, userData=region_id)
+                
+            if region_actual:
+                self.combo_region_morfema.setCurrentText(region_actual)
+        except sqlite3.Error:
+            pass
+
+    def guardar_morfema(self):
+        region_id = self.combo_region_morfema.currentData()
+        tipo = self.combo_tipo_morfema.currentText()
+        valor = self.input_valor_morfema.text().strip().lower()
+
+        if not region_id or not valor:
+            QMessageBox.warning(self, "Validación", "No hay región seleccionada o el morfema está vacío.")
+            return
+
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("INSERT INTO morfemas (region_id, tipo, valor) VALUES (?, ?, ?)", (region_id, tipo, valor))
+            conexion.commit()
+            conexion.close()
+            
+            QMessageBox.information(self, "Éxito", f"Morfema '{valor}' guardado con éxito.")
+            self.input_valor_morfema.clear()
+            self.callback_sincronizar()
+        except sqlite3.Error as e:
+            QMessageBox.critical(self, "Error SQL", str(e))
+
+
+# =====================================================================
+# NUEVA PESTAÑA 4: EDITOR DE CONTENIDO (CRUD - MODIFICAR / ELIMINAR)
+# =====================================================================
+class TabEditor(QWidget):
+    def __init__(self, callback_sincronizar):
+        super().__init__()
+        self.callback_sincronizar = callback_sincronizar
+        self.crear_interfaz()
+
+    def crear_interfaz(self):
+        layout_principal = QVBoxLayout()
+        layout_principal.setAlignment(Qt.AlignCenter)
+
+        panel_editor = QFrame()
+        panel_editor.setObjectName("panel")
+        panel_editor.setFixedWidth(550)
+        layout_editor = QVBoxLayout(panel_editor)
+        layout_editor.setContentsMargins(25, 25, 25, 25)
+        layout_editor.setSpacing(15)
+
+        titulo = QLabel("📝 Panel de Modificación General")
+        titulo.setObjectName("titulo_panel")
+        titulo.setAlignment(Qt.AlignCenter)
+        layout_editor.addWidget(titulo)
+
+        # Combo Superior de Categoría Maestro
+        form_maestro = QFormLayout()
+        self.combo_categoria = QComboBox()
+        self.combo_categoria.addItems(["Regiones", "Facciones (Reinos/Tribus)", "Morfemas"])
+        self.combo_categoria.currentIndexChanged.connect(self.cambiar_capa_formulario)
+        form_maestro.addRow("Elemento a Modificar:", self.combo_categoria)
+        layout_editor.addLayout(form_maestro)
+        layout_editor.addSpacing(5)
+
+        # Contenedor StackedWidget
+        self.stack_formularios = QStackedWidget()
+
+        # --- CAPA A: EDITAR REGIONES ---
+        self.capa_regiones = QWidget()
+        layout_capa_reg = QFormLayout(self.capa_regiones)
+        self.combo_edit_region = QComboBox()
+        self.combo_edit_region.currentIndexChanged.connect(self.preparar_edicion_region)
+        self.input_edit_region = QLineEdit()
+        layout_capa_reg.addRow("Seleccionar Región:", self.combo_edit_region)
+        layout_capa_reg.addRow("Nuevo Nombre:", self.input_edit_region)
+        
+        layout_btns_reg = QHBoxLayout()
+        btn_upd_reg = QPushButton("Actualizar")
+        btn_upd_reg.clicked.connect(self.actualizar_region)
+        btn_del_reg = QPushButton("Eliminar")
+        btn_del_reg.setObjectName("btn_eliminar")
+        btn_del_reg.clicked.connect(self.eliminar_region)
+        layout_btns_reg.addWidget(btn_upd_reg)
+        layout_btns_reg.addWidget(btn_del_reg)
+        layout_capa_reg.addRow("", layout_btns_reg)
+
+        # --- CAPA B: EDITAR FACCIONES ---
+        self.capa_facciones = QWidget()
+        layout_capa_fac = QFormLayout(self.capa_facciones)
+        self.combo_filtro_reg_f = QComboBox()
+        self.combo_filtro_reg_f.currentTextChanged.connect(self.cargar_facciones_por_filtro)
+        self.combo_edit_faccion = QComboBox()
+        self.combo_edit_faccion.currentIndexChanged.connect(self.preparar_edicion_faccion)
+        self.combo_edit_tipo_f = QComboBox()
+        self.combo_edit_tipo_f.addItems(["Reino", "Tribu"])
+        self.input_edit_faccion = QLineEdit()
+        
+        layout_capa_fac.addRow("Filtrar por Región:", self.combo_filtro_reg_f)
+        layout_capa_fac.addRow("Seleccionar Facción:", self.combo_edit_faccion)
+        layout_capa_fac.addRow("Modificar Tipo:", self.combo_edit_tipo_f)
+        layout_capa_fac.addRow("Nuevo Nombre:", self.input_edit_faccion)
+
+        layout_btns_fac = QHBoxLayout()
+        btn_upd_fac = QPushButton("Actualizar")
+        btn_upd_fac.clicked.connect(self.actualizar_faccion)
+        btn_del_fac = QPushButton("Eliminar")
+        btn_del_fac.setObjectName("btn_eliminar")
+        btn_del_fac.clicked.connect(self.eliminar_faccion)
+        layout_btns_fac.addWidget(btn_upd_fac)
+        layout_btns_fac.addWidget(btn_del_fac)
+        layout_capa_fac.addRow("", layout_btns_fac)
+
+        # --- CAPA C: EDITAR MORFEMAS ---
+        self.capa_morfemas = QWidget()
+        layout_capa_mor = QFormLayout(self.capa_morfemas)
+        self.combo_filtro_reg_m = QComboBox()
+        self.combo_filtro_reg_m.currentTextChanged.connect(self.cargar_morfemas_por_filtro)
+        self.combo_filtro_tipo_m = QComboBox()
+        self.combo_filtro_tipo_m.addItems(["prefijos", "raices", "sufijos"])
+        self.combo_filtro_tipo_m.currentTextChanged.connect(self.cargar_morfemas_por_filtro)
+        self.combo_edit_morfema = QComboBox()
+        self.combo_edit_morfema.currentIndexChanged.connect(self.preparar_edicion_morfema)
+        self.input_edit_morfema = QLineEdit()
+
+        layout_capa_mor.addRow("Filtrar por Región:", self.combo_filtro_reg_m)
+        layout_capa_mor.addRow("Filtrar por Tipo:", self.combo_filtro_tipo_m)
+        layout_capa_mor.addRow("Seleccionar Sílaba:", self.combo_edit_morfema)
+        layout_capa_mor.addRow("Nuevo Valor:", self.input_edit_morfema)
+
+        layout_btns_mor = QHBoxLayout()
+        btn_upd_mor = QPushButton("Actualizar")
+        btn_upd_mor.clicked.connect(self.actualizar_morfema)
+        btn_del_mor = QPushButton("Eliminar")
+        btn_del_mor.setObjectName("btn_eliminar")
+        btn_del_mor.clicked.connect(self.eliminar_morfema)
+        layout_btns_mor.addWidget(btn_upd_mor)
+        layout_btns_mor.addWidget(btn_del_mor)
+        layout_capa_mor.addRow("", layout_btns_mor)
+
+        # Integrar capas al Stack maestro
+        self.stack_formularios.addWidget(self.capa_regiones)
+        self.stack_formularios.addWidget(self.capa_facciones)
+        self.stack_formularios.addWidget(self.capa_morfemas)
+
+        layout_editor.addWidget(self.stack_formularios)
+        layout_principal.addWidget(panel_editor)
+        self.setLayout(layout_principal)
+        
+        self.actualizar_combos()
+
+    def cambiar_capa_formulario(self, index):
+        self.stack_formularios.setCurrentIndex(index)
+
+    def actualizar_combos(self):
+        """Llena los selectores iniciales y de filtrado desde la base de datos."""
+        # Bloqueamos señales temporalmente para evitar ejecuciones en cascada vacías
+        self.combo_edit_region.blockSignals(True)
+        self.combo_filtro_reg_f.blockSignals(True)
+        self.combo_filtro_reg_m.blockSignals(True)
+
+        self.combo_edit_region.clear()
+        self.combo_filtro_reg_f.clear()
+        self.combo_filtro_reg_m.clear()
+
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("SELECT id, nombre FROM regiones")
+            regiones = cursor.fetchall()
+            conexion.close()
+
+            for r_id, r_nombre in regiones:
+                self.combo_edit_region.addItem(r_nombre, userData=r_id)
+                self.combo_filtro_reg_f.addItem(r_nombre, userData=r_id)
+                self.combo_filtro_reg_m.addItem(r_nombre, userData=r_id)
+        except sqlite3.Error:
+            pass
+
+        self.combo_edit_region.blockSignals(False)
+        self.combo_filtro_reg_f.blockSignals(False)
+        self.combo_filtro_reg_m.blockSignals(False)
+
+        # Forzar recarga manual ordenada
+        self.preparar_edicion_region()
+        self.cargar_facciones_por_filtro()
+        self.cargar_morfemas_por_filtro()
+
+    # --- FLUJO REGIONES ---
+    def preparar_edicion_region(self):
+        self.input_edit_region.setText(self.combo_edit_region.currentText())
+
+    def actualizar_region(self):
+        region_id = self.combo_edit_region.currentData()
+        nuevo_nombre = self.input_edit_region.text().strip()
+        if not region_id or not nuevo_nombre: return
+
+        try:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("UPDATE regiones SET nombre = ? WHERE id = ?", (nuevo_nombre, region_id))
+            conexion.commit()
+            conexion.close()
+            QMessageBox.information(self, "Éxito", "Nombre de la región modificado con éxito.")
+            self.callback_sincronizar()
+        except sqlite3.Error as e:
+            QMessageBox.warning(self, "Error", "La región ya existe o es inválida.")
+
+    def eliminar_region(self):
+        region_id = self.combo_edit_region.currentData()
+        if not region_id: return
+        
+        box = QMessageBox.question(self, "Confirmar", 
+                                   "⚠️ ¿Seguro que deseas eliminar esta región?\n"
+                                   "Esto borrará de forma PERMANENTE todos sus reinos, tribus y morfemas asociados.",
+                                   QMessageBox.Yes | QMessageBox.No)
+        if box == QMessageBox.Yes:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("DELETE FROM morfemas WHERE region_id = ?", (region_id,))
+            cursor.execute("DELETE FROM facciones WHERE region_id = ?", (region_id,))
+            cursor.execute("DELETE FROM regiones WHERE id = ?", (region_id,))
+            conexion.commit()
+            conexion.close()
+            self.callback_sincronizar()
+
+    # --- FLUJO FACCIONES ---
+    def cargar_facciones_por_filtro(self):
+        self.combo_edit_faccion.blockSignals(True)
+        self.combo_edit_faccion.clear()
+        region_id = self.combo_filtro_reg_f.currentData()
+        
+        if region_id:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("SELECT id, nombre, tipo FROM facciones WHERE region_id = ?", (region_id,))
+            facciones = cursor.fetchall()
+            conexion.close()
+            for f_id, f_nombre, f_tipo in facciones:
+                self.combo_edit_faccion.addItem(f"[{f_tipo}] {f_nombre}", userData=f_id)
+                
+        self.combo_edit_faccion.blockSignals(False)
+        self.preparar_edicion_faccion()
+
+    def preparar_edicion_faccion(self):
+        faccion_id = self.combo_edit_faccion.currentData()
+        if not faccion_id:
+            self.input_edit_faccion.clear()
+            return
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("SELECT nombre, tipo FROM facciones WHERE id = ?", (faccion_id,))
+        res = cursor.fetchone()
+        conexion.close()
+        if res:
+            self.input_edit_faccion.setText(res[0])
+            self.combo_edit_tipo_f.setCurrentText(res[1])
+
+    def actualizar_faccion(self):
+        faccion_id = self.combo_edit_faccion.currentData()
+        nuevo_nombre = self.input_edit_faccion.text().strip()
+        nuevo_tipo = self.combo_edit_tipo_f.currentText()
+        if not faccion_id or not nuevo_nombre: return
+
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("UPDATE facciones SET nombre = ?, tipo = ? WHERE id = ?", (nuevo_nombre, nuevo_tipo, faccion_id))
+        conexion.commit()
+        conexion.close()
+        QMessageBox.information(self, "Éxito", "Facción actualizada correctamente.")
+        self.callback_sincronizar()
+
+    def eliminar_faccion(self):
+        faccion_id = self.combo_edit_faccion.currentData()
+        if not faccion_id: return
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("DELETE FROM facciones WHERE id = ?", (faccion_id,))
+        conexion.commit()
+        conexion.close()
+        self.callback_sincronizar()
+
+    # --- FLUJO MORFEMAS ---
+    def cargar_morfemas_por_filtro(self):
+        self.combo_edit_morfema.blockSignals(True)
+        self.combo_edit_morfema.clear()
+        region_id = self.combo_filtro_reg_m.currentData()
+        tipo = self.combo_filtro_tipo_m.currentText()
+        
+        if region_id and tipo:
+            conexion = sqlite3.connect("lore.db")
+            cursor = conexion.cursor()
+            cursor.execute("SELECT id, valor FROM morfemas WHERE region_id = ? AND tipo = ?", (region_id, tipo))
+            morfemas = cursor.fetchall()
+            conexion.close()
+            for m_id, m_valor in morfemas:
+                self.combo_edit_morfema.addItem(m_valor, userData=m_id)
+                
+        self.combo_edit_morfema.blockSignals(False)
+        self.preparar_edicion_morfema()
+
+    def preparar_edicion_morfema(self):
+        morfema_id = self.combo_edit_morfema.currentData()
+        if not morfema_id:
+            self.input_edit_morfema.clear()
+            return
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("SELECT valor FROM morfemas WHERE id = ?", (morfema_id,))
+        res = cursor.fetchone()
+        conexion.close()
+        if res:
+            self.input_edit_morfema.setText(res[0])
+
+    def actualizar_morfema(self):
+        morfema_id = self.combo_edit_morfema.currentData()
+        nuevo_valor = self.input_edit_morfema.text().strip().lower()
+        if not morfema_id or not nuevo_valor: return
+
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("UPDATE morfemas SET valor = ? WHERE id = ?", (nuevo_valor, morfema_id))
+        conexion.commit()
+        conexion.close()
+        QMessageBox.information(self, "Éxito", "Morfema lingüístico actualizado.")
+        self.callback_sincronizar()
+
+    def eliminar_morfema(self):
+        morfema_id = self.combo_edit_morfema.currentData()
+        if not morfema_id: return
+        conexion = sqlite3.connect("lore.db")
+        cursor = conexion.cursor()
+        cursor.execute("DELETE FROM morfemas WHERE id = ?", (morfema_id,))
+        conexion.commit()
+        conexion.close()
+        self.callback_sincronizar()
+
+
+# =====================================================================
+# VENTANA PRINCIPAL (CONTENEDOR DE PESTAÑAS)
+# =====================================================================
+class VentanaUnificada(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.settings = QSettings("FernandoBarra", "SuiteMundoLore")
+        self.setWindowTitle("Enciclopedia del Universo - Suite de Ingeniería")
+        self.resize(850, 560)
+
+        inicializar_y_actualizar_db()
+
+        self.crear_suite()
+        self.aplicar_estilos()
+
+    def crear_suite(self):
+        layout_maestro = QVBoxLayout()
+        layout_maestro.setContentsMargins(10, 10, 10, 10)
+
+        self.pestanas = QTabWidget()
+
+        # Instanciar paneles pasando el método central sincronizar_todo
+        self.tab_generador = TabGenerador()
+        self.tab_mundo = TabGestorMundo(self.sincronizar_todo)
+        self.tab_morfemas = TabGestorMorfemas(self.sincronizar_todo)
+        self.tab_editor = TabEditor(self.sincronizar_todo) # <-- Nueva Instancia
+
+        self.pestanas.addTab(self.tab_generador, "🌌 Forja de Nombres")
+        self.pestanas.addTab(self.tab_mundo, "🗺️ Panel de Mundo")
+        self.pestanas.addTab(self.tab_morfemas, "🧬 Lingüística") 
+        self.pestanas.addTab(self.tab_editor, "📝 Editor de Contenido") # <-- Nueva pestaña vinculada
+
+        layout_maestro.addWidget(self.pestanas)
+        self.setLayout(layout_maestro)
+
+    def sincronizar_todo(self):
+        """Refresca todos los elementos de selección en todas las pantallas en tiempo real."""
+        self.tab_generador.actualizar_combo_regiones()
+        self.tab_mundo.actualizar_combos()
+        self.tab_morfemas.actualizar_combos()
+        self.tab_editor.actualizar_combos()
+
+    def aplicar_estilos(self):
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1b1d22;
+                color: #f2f2f2;
+                font-family: 'Segoe UI', Arial, sans-serif;
+                font-size: 11pt;
+            }
+            
+            
+            QLabel {
+                background-color: transparent;
+            }
+
+            QTabWidget::pane {
+                border: 1px solid #323743;
+                background-color: #1b1d22;
+                border-radius: 8px;
+            }
+            
+            QTabBar::tab {
+                background-color: #262a31;
+                border: 1px solid #323743;
+                padding: 10px 20px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                font-weight: bold;
+                color: #b8c0cc;
+            }
+
+            QTabBar::tab:selected {
+                background-color: #2f80c1;
+                color: white;
+                border-bottom-color: #2f80c1;
+            }
+
+            QTabBar::tab:hover:!selected {
+                background-color: #343b48;
+                color: white;
+            }
+
+            QFrame#panel {
+                background-color: #262a31;
+                border: 1px solid #323743;
+                border-radius: 14px;
+            }
+
+            QLabel#titulo_principal {
+                font-size: 24px;
+                font-weight: 700;
+                color: #ffffff;
+                background-color: transparent;
+            }
+
+            QLabel#titulo_panel {
+                font-size: 16px;
+                font-weight: 600;
+                color: #3d8ed0;
+                background-color: transparent;
+            }
+
+            QLabel#subtitulo {
+                font-size: 13px;
+                color: #b8c0cc;
+                background-color: transparent;
+            }
+
+            QLabel#resultado {
+                font-size: 20px;
+                font-weight: 600;
+                color: #ffffff;
+                background-color: transparent;
+                border: none;
+                padding: 4px 0px;
+            }
+
+            QTextEdit, QLineEdit {
+                background-color: #171a20;
+                color: #e8ecf1;
+                border: 1px solid #343b48;
+                border-radius: 10px;
+                padding: 8px;
+            }
+
+            QComboBox {
+                background-color: #171a20;
+                color: #f2f2f2;
+                border: 1px solid #343b48;
+                border-radius: 10px;
+                padding: 6px 12px;
+                min-height: 20px;
+            }
+
+            QComboBox::drop-down {
+                border: none;
+                width: 25px;
+            }
+
+            /* --- ESTILOS DE BOTONES DE ACCIÓN --- */
+            QPushButton {
+                background-color: #2f80c1;
+                color: white;
+                border: none;
+                border-radius: 10px;
+                padding: 10px 18px;
+                font-size: 14px;
+                font-weight: 700;
+                min-height: 20px;
+            }
+
+            QPushButton:hover {
+                background-color: #3d8ed0;
+            }
+
+            QPushButton:pressed {
+                background-color: #276b9f;
+            }
+
+            /* --- BOTÓN ELIMINAR (ALERTA) --- */
+            QPushButton#btn_eliminar {
+                background-color: #a93226;
+            }
+            QPushButton#btn_eliminar:hover {
+                background-color: #cb4335;
+            }
+            QPushButton#btn_eliminar:pressed {
+                background-color: #7b241c;
+            }
+        """)
+
+    def closeEvent(self, event):
+        self.settings.setValue("geometry", self.saveGeometry())
+        super().closeEvent(event)
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    ventana = VentanaUnificada()
+    
+    settings = QSettings("FernandoBarra", "SuiteMundoLore")
+    geometry = settings.value("geometry")
+    if geometry:
+        ventana.restoreGeometry(geometry)
+        
+    ventana.show()
+    sys.exit(app.exec())
